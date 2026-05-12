@@ -6,12 +6,12 @@ Usage:
     python ask.py --openai                 # auto-generate responses with GPT-4o-mini
     python ask.py --openai --n 10          # generate 10 responses instead of 5
 
-In auto mode the script samples the same question N times at temperature=1
-to get a spread of responses, then runs the semantic clustering + entropy
-analysis exactly as described in the paper.
+Entailment model (controls cluster quality):
+    Default: cross-encoder/nli-deberta-v3-small  (~180 MB, downloaded once)
+    Fallback: content-word heuristic (offline, less accurate)
 
 Requirements:
-    pip install openai scikit-learn numpy
+    pip install openai scikit-learn numpy torch transformers
     export OPENAI_API_KEY=sk-...   (only needed for --openai mode)
 """
 
@@ -25,20 +25,47 @@ from sklearn.feature_extraction.text import TfidfVectorizer, ENGLISH_STOP_WORDS
 from sklearn.metrics.pairwise import cosine_similarity
 
 # --------------------------------------------------------------------------
-# Entailment model  (content-word heuristic, fully offline)
+# Entailment model 1: DeBERTa NLI  (best quality, ~180 MB download)
 #
-# Pure TF-IDF fails on short answers: "the color is yellow" vs
-# "the color is black" scores 0.81 because structure words dominate.
-# This version compares *content words* (non-stopwords) instead.
+# cross-encoder/nli-deberta-v3-small is a proper NLI model that understands
+# meaning, not just word overlap. It correctly merges paraphrases like
+# "Bell invented the telephone" and "Bell patented the telephone" into the
+# same cluster, and correctly separates "the color is yellow" from
+# "the color is black".
 #
-# Rules (applied in order):
-#   1. If one response's content words are a SUBSET of the other's -> entailment
-#      ("yellow" is a subset of "yellow fur" -> same answer, more specific)
-#   2. If content-word Jaccard >= 0.5 -> entailment
-#      ("invented telephone Bell" ~ "Bell invented telephone")
-#   3. If BOTH sides have unique content words not in the other -> contradiction
-#      ("yellow" unique to left, "black" unique to right -> different answers)
-#   4. Otherwise -> neutral
+# Label order for this model: 0=contradiction, 1=entailment, 2=neutral
+# We remap to the paper's convention:  0=contradiction, 1=neutral, 2=entailment
+# --------------------------------------------------------------------------
+
+class EntailmentDebertaSmall:
+
+    MODEL = "cross-encoder/nli-deberta-v3-small"
+    REMAP = {0: 0, 1: 2, 2: 1}   # model order -> paper order
+
+    def __init__(self):
+        import torch
+        import torch.nn.functional as F
+        from transformers import AutoModelForSequenceClassification, AutoTokenizer
+        self._F      = F
+        self._device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"  Loading {self.MODEL} on {self._device} ...")
+        self._tok   = AutoTokenizer.from_pretrained(self.MODEL)
+        self._model = AutoModelForSequenceClassification.from_pretrained(self.MODEL).to(self._device)
+        self._model.eval()
+        print(f"  Model ready.\n")
+
+    def check_implication(self, text1: str, text2: str, *args, **kwargs) -> int:
+        import torch
+        inputs = self._tok(text1, text2, return_tensors="pt",
+                           truncation=True, max_length=512).to(self._device)
+        with torch.no_grad():
+            logits = self._model(**inputs).logits
+        raw = torch.argmax(self._F.softmax(logits, dim=1)).cpu().item()
+        return self.REMAP[raw]
+
+
+# --------------------------------------------------------------------------
+# Entailment model 2: content-word heuristic  (offline fallback)
 # --------------------------------------------------------------------------
 
 class EntailmentContent:
@@ -51,26 +78,33 @@ class EntailmentContent:
     def check_implication(self, text1: str, text2: str, *args, **kwargs) -> int:
         c1, c2 = self._content(text1), self._content(text2)
 
-        # Fall back to TF-IDF if one side is all stopwords (e.g. "it is")
         if not c1 or not c2:
             vec = TfidfVectorizer().fit_transform([text1, text2])
             sim = float(cosine_similarity(vec[0], vec[1])[0, 0])
             return 2 if sim >= 0.45 else (1 if sim >= 0.15 else 0)
 
-        # Rule 1: subset -> entailment ("yellow" c "yellow fur")
         if c1.issubset(c2) or c2.issubset(c1):
             return 2
 
-        # Rule 2: high Jaccard -> entailment
         jaccard = len(c1 & c2) / len(c1 | c2)
         if jaccard >= 0.5:
             return 2
 
-        # Rule 3: both sides carry distinct content -> contradiction
         if (c1 - c2) and (c2 - c1):
             return 0
 
         return 1
+
+
+def load_entailment_model():
+    """Try DeBERTa first; fall back to heuristic if unavailable."""
+    try:
+        model = EntailmentDebertaSmall()
+        return model, "cross-encoder/nli-deberta-v3-small"
+    except Exception as e:
+        print(f"  Could not load DeBERTa ({e})")
+        print("  Falling back to content-word heuristic.\n")
+        return EntailmentContent(), "content-word heuristic"
 
 # --------------------------------------------------------------------------
 # Core functions from semantic_entropy.py (unchanged)
@@ -199,10 +233,11 @@ def sep(c="-"):  print(c * W)
 def h(t, c="="): sep(c); print(f"  {t}"); sep(c)
 
 
-def analyse(question: str, responses_with_lp: list[tuple[str, float]], source: str):
+def analyse(question: str, responses_with_lp: list[tuple[str, float]], source: str, model=None):
     responses   = [r for r, _ in responses_with_lp]
     log_probs   = [lp for _, lp in responses_with_lp]
-    model       = EntailmentContent()
+    if model is None:
+        model = EntailmentContent()
 
     print()
     h(f"Question: {question}")
@@ -292,6 +327,8 @@ def main():
     parser.add_argument("--openai",  action="store_true", help="Use OpenAI to generate responses")
     parser.add_argument("--model",   default="gpt-4o-mini", help="OpenAI model (default: gpt-4o-mini)")
     parser.add_argument("--n",       type=int, default=5,   help="Number of responses to sample (default: 5)")
+    parser.add_argument("--entailment-model", default=None,
+                        help="NLI model name or local path (default: cross-encoder/nli-deberta-v3-small)")
     args = parser.parse_args()
 
     print("=" * W)
@@ -304,6 +341,12 @@ def main():
     else:
         print("\nMode: manual (you provide the responses)")
         print("Tip:  run with --openai to auto-generate responses via GPT-4o-mini")
+
+    print("\nLoading entailment model...")
+    if args.entailment_model:
+        EntailmentDebertaSmall.MODEL = args.entailment_model
+    entailment_model, model_name = load_entailment_model()
+    print(f"Entailment: {model_name}\n")
 
     while True:
         print()
@@ -328,7 +371,7 @@ def main():
             pairs  = collect_responses_manually()
             source = "manual"
 
-        analyse(question, pairs, source)
+        analyse(question, pairs, source, model=entailment_model)
 
         again = input("Try another question? [Y/n]: ").strip().lower()
         if again in ("n", "no"):
