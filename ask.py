@@ -7,8 +7,9 @@ Usage:
     python ask.py --openai --n 10          # generate 10 responses instead of 5
 
 Entailment model (controls cluster quality):
-    Default: cross-encoder/nli-deberta-v3-small  (~180 MB, downloaded once)
-    Fallback: content-word heuristic (offline, less accurate)
+    Best:     python ask.py --openai-entailment   (GPT judge, needs API key)
+    Good:     cross-encoder/nli-deberta-v3-small  (~180 MB, downloaded once)
+    Fallback: content-word heuristic              (offline, no downloads)
 
 Requirements:
     pip install openai scikit-learn numpy torch transformers
@@ -65,7 +66,56 @@ class EntailmentDebertaSmall:
 
 
 # --------------------------------------------------------------------------
-# Entailment model 2: content-word heuristic  (offline fallback)
+# Entailment model 2: OpenAI as NLI judge  (best quality, needs API key)
+#
+# Matches the paper's EntailmentGPT4 exactly. GPT judges whether text1
+# semantically entails text2, returning entailment / neutral / contradiction.
+# Results are cached so each pair is only called once.
+# --------------------------------------------------------------------------
+
+class EntailmentOpenAI:
+
+    PROMPT = (
+        "We are evaluating answers to the question \"{question}\"\n"
+        "Here are two possible answers:\n"
+        "Possible Answer 1: {t1}\nPossible Answer 2: {t2}\n"
+        "Does Possible Answer 1 semantically entail Possible Answer 2? "
+        "Respond with entailment, contradiction, or neutral."
+    )
+
+    def __init__(self, model: str = "gpt-4o-mini"):
+        from openai import OpenAI
+        self._client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+        self._model  = model
+        self._cache: dict[tuple, int] = {}
+
+    def check_implication(self, text1: str, text2: str, question: str = "", *args, **kwargs) -> int:
+        key = (text1, text2, question)
+        if key in self._cache:
+            return self._cache[key]
+
+        prompt = self.PROMPT.format(question=question, t1=text1, t2=text2)
+        resp = self._client.chat.completions.create(
+            model=self._model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+            max_tokens=10,
+        )
+        answer = resp.choices[0].message.content.strip().lower()
+
+        if "entailment" in answer:
+            result = 2
+        elif "contradiction" in answer:
+            result = 0
+        else:
+            result = 1
+
+        self._cache[key] = result
+        return result
+
+
+# --------------------------------------------------------------------------
+# Entailment model 3: content-word heuristic  (offline fallback)
 # --------------------------------------------------------------------------
 
 class EntailmentContent:
@@ -96,13 +146,29 @@ class EntailmentContent:
         return 1
 
 
-def load_entailment_model():
-    """Try DeBERTa first; fall back to heuristic if unavailable."""
+def load_entailment_model(use_openai: bool = False, openai_model: str = "gpt-4o-mini",
+                          local_path: str = None):
+    """
+    Priority:
+      1. --openai-entailment  -> GPT judge (best, needs API key)
+      2. --entailment-model   -> local DeBERTa path
+      3. default              -> try downloading DeBERTa, fall back to heuristic
+    """
+    if use_openai:
+        if not os.environ.get("OPENAI_API_KEY"):
+            print("  OPENAI_API_KEY not set; falling back to heuristic.")
+            return EntailmentContent(), "content-word heuristic"
+        m = EntailmentOpenAI(model=openai_model)
+        return m, f"OpenAI {openai_model} (NLI judge)"
+
+    if local_path:
+        EntailmentDebertaSmall.MODEL = local_path
+
     try:
         model = EntailmentDebertaSmall()
-        return model, "cross-encoder/nli-deberta-v3-small"
+        return model, EntailmentDebertaSmall.MODEL
     except Exception as e:
-        print(f"  Could not load DeBERTa ({e})")
+        print(f"  Could not load DeBERTa: {e}")
         print("  Falling back to content-word heuristic.\n")
         return EntailmentContent(), "content-word heuristic"
 
@@ -110,10 +176,10 @@ def load_entailment_model():
 # Core functions from semantic_entropy.py (unchanged)
 # --------------------------------------------------------------------------
 
-def get_semantic_ids(strings_list, model, strict_entailment=False):
+def get_semantic_ids(strings_list, model, strict_entailment=False, question=""):
     def are_equivalent(t1, t2):
-        i1 = model.check_implication(t1, t2)
-        i2 = model.check_implication(t2, t1)
+        i1 = model.check_implication(t1, t2, question=question)
+        i2 = model.check_implication(t2, t1, question=question)
         if strict_entailment:
             return i1 == 2 and i2 == 2
         return (0 not in [i1, i2]) and ([1, 1] != [i1, i2])
@@ -267,7 +333,7 @@ def analyse(question: str, responses_with_lp: list[tuple[str, float]], source: s
 
     # Clustering
     print("\nClustering into semantic groups (bidirectional NLI) ...")
-    sem_ids = get_semantic_ids(responses, model)
+    sem_ids = get_semantic_ids(responses, model, question=question)
 
     clusters: dict[int, list] = {}
     for i, (r, sid) in enumerate(zip(responses, sem_ids)):
@@ -329,6 +395,8 @@ def main():
     parser.add_argument("--n",       type=int, default=5,   help="Number of responses to sample (default: 5)")
     parser.add_argument("--entailment-model", default=None,
                         help="NLI model name or local path (default: cross-encoder/nli-deberta-v3-small)")
+    parser.add_argument("--openai-entailment", action="store_true",
+                        help="Use OpenAI as the NLI judge (best quality, uses API key)")
     args = parser.parse_args()
 
     print("=" * W)
@@ -343,9 +411,11 @@ def main():
         print("Tip:  run with --openai to auto-generate responses via GPT-4o-mini")
 
     print("\nLoading entailment model...")
-    if args.entailment_model:
-        EntailmentDebertaSmall.MODEL = args.entailment_model
-    entailment_model, model_name = load_entailment_model()
+    entailment_model, model_name = load_entailment_model(
+        use_openai=args.openai_entailment,
+        openai_model=args.model,
+        local_path=args.entailment_model,
+    )
     print(f"Entailment: {model_name}\n")
 
     while True:
