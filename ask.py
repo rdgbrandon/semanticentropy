@@ -2,14 +2,16 @@
 ask.py  --  interactive semantic entropy explorer
 ==================================================
 Usage:
-    python ask.py                          # manual mode: you paste responses
-    python ask.py --openai                 # auto-generate responses with GPT-4o-mini
-    python ask.py --openai --n 10          # generate 10 responses instead of 5
+    python ask.py                                    # manual mode
+    python ask.py --claude --claude-entailment       # Claude generates + judges (best)
+    python ask.py --openai --openai-entailment       # OpenAI generates + judges
+    python ask.py --claude --n 10                    # 10 samples from Claude
 
 Entailment model (controls cluster quality):
-    Best:     python ask.py --openai-entailment   (GPT judge, needs API key)
-    Good:     cross-encoder/nli-deberta-v3-small  (~180 MB, downloaded once)
-    Fallback: content-word heuristic              (offline, no downloads)
+    Best:     --claude-entailment   Claude NLI judge  (needs ANTHROPIC_API_KEY)
+              --openai-entailment   GPT NLI judge     (needs OPENAI_API_KEY)
+    Good:     cross-encoder/nli-deberta-v3-small      (~180 MB, downloaded once)
+    Fallback: content-word heuristic                  (offline, no downloads)
 
 Requirements:
     pip install openai scikit-learn numpy torch transformers
@@ -147,13 +149,22 @@ class EntailmentContent:
 
 
 def load_entailment_model(use_openai: bool = False, openai_model: str = "gpt-4o-mini",
+                          use_claude: bool = False, claude_model: str = "claude-haiku-4-5",
                           local_path: str = None):
     """
     Priority:
-      1. --openai-entailment  -> GPT judge (best, needs API key)
-      2. --entailment-model   -> local DeBERTa path
-      3. default              -> try downloading DeBERTa, fall back to heuristic
+      1. --claude-entailment  -> Claude judge
+      2. --openai-entailment  -> GPT judge
+      3. --entailment-model   -> local DeBERTa path
+      4. default              -> try downloading DeBERTa, fall back to heuristic
     """
+    if use_claude:
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            print("  ANTHROPIC_API_KEY not set; falling back to heuristic.")
+            return EntailmentContent(), "content-word heuristic"
+        m = EntailmentClaude(model=claude_model)
+        return m, f"Claude {claude_model} (NLI judge)"
+
     if use_openai:
         if not os.environ.get("OPENAI_API_KEY"):
             print("  OPENAI_API_KEY not set; falling back to heuristic.")
@@ -225,6 +236,85 @@ def predictive_entropy(log_probs):
 # --------------------------------------------------------------------------
 # OpenAI sampler
 # --------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------
+# Claude generation + entailment
+# --------------------------------------------------------------------------
+
+def sample_responses_claude(question: str, n: int, model: str = "claude-haiku-4-5") -> list[tuple[str, float]]:
+    """Sample n responses from Claude. Returns (text, log_prob) tuples.
+    Claude does not expose token log-probs, so we use uniform weights."""
+    import anthropic
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        sys.exit("ANTHROPIC_API_KEY not set.\n"
+                 "Get a key at console.anthropic.com, then:\n"
+                 "  $env:ANTHROPIC_API_KEY = 'sk-ant-...'")
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    print(f"\nSampling {n} responses from {model} (temperature=1.0) ...")
+    results = []
+    for i in range(n):
+        msg = client.messages.create(
+            model=model,
+            max_tokens=120,
+            temperature=1.0,
+            system="Answer the question concisely in 1-2 sentences.",
+            messages=[{"role": "user", "content": question}],
+        )
+        text = msg.content[0].text.strip()
+        results.append((text, -1.0))   # uniform weight; Claude doesn't expose logprobs
+        print(f"  [{i+1}/{n}] {text[:80]}")
+
+    return results
+
+
+class EntailmentClaude:
+    """Use Claude as the NLI judge — same prompt as the paper's EntailmentGPT4."""
+
+    PROMPT = (
+        "We are evaluating answers to the question \"{question}\"\n"
+        "Here are two possible answers:\n"
+        "Possible Answer 1: {t1}\nPossible Answer 2: {t2}\n"
+        "Does Possible Answer 1 semantically entail Possible Answer 2? "
+        "Respond with entailment, contradiction, or neutral."
+    )
+
+    def __init__(self, model: str = "claude-haiku-4-5"):
+        import anthropic
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise ValueError("ANTHROPIC_API_KEY not set")
+        self._client = anthropic.Anthropic(api_key=api_key)
+        self._model  = model
+        self._cache: dict[tuple, int] = {}
+
+    def check_implication(self, text1: str, text2: str, question: str = "", *args, **kwargs) -> int:
+        key = (text1, text2, question)
+        if key in self._cache:
+            return self._cache[key]
+
+        prompt = self.PROMPT.format(question=question, t1=text1, t2=text2)
+        msg = self._client.messages.create(
+            model=self._model,
+            max_tokens=10,
+            temperature=0.0,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        answer = msg.content[0].text.strip().lower()
+
+        if "entailment" in answer:
+            result = 2
+        elif "contradiction" in answer:
+            result = 0
+        else:
+            result = 1
+
+        self._cache[key] = result
+        return result
+
 
 def sample_responses_openai(question: str, n: int, model: str = "gpt-4o-mini") -> list[tuple[str, float]]:
     """Return list of (response_text, log_prob) tuples."""
@@ -391,12 +481,16 @@ def analyse(question: str, responses_with_lp: list[tuple[str, float]], source: s
 def main():
     parser = argparse.ArgumentParser(description="Interactive semantic entropy explorer")
     parser.add_argument("--openai",  action="store_true", help="Use OpenAI to generate responses")
+    parser.add_argument("--claude",  action="store_true", help="Use Claude to generate responses")
     parser.add_argument("--model",   default="gpt-4o-mini", help="OpenAI model (default: gpt-4o-mini)")
+    parser.add_argument("--claude-model", default="claude-haiku-4-5", help="Claude model (default: claude-haiku-4-5)")
     parser.add_argument("--n",       type=int, default=5,   help="Number of responses to sample (default: 5)")
     parser.add_argument("--entailment-model", default=None,
                         help="NLI model name or local path (default: cross-encoder/nli-deberta-v3-small)")
     parser.add_argument("--openai-entailment", action="store_true",
-                        help="Use OpenAI as the NLI judge (best quality, uses API key)")
+                        help="Use OpenAI as the NLI judge (needs OPENAI_API_KEY)")
+    parser.add_argument("--claude-entailment", action="store_true",
+                        help="Use Claude as the NLI judge (needs ANTHROPIC_API_KEY)")
     args = parser.parse_args()
 
     print("=" * W)
@@ -404,14 +498,18 @@ def main():
     print("  Based on: Farquhar et al., Nature 2024  (github.com/jlko/semantic_uncertainty)")
     print("=" * W)
 
-    if args.openai:
+    if args.claude:
+        print(f"\nMode: Claude ({args.claude_model}), sampling {args.n} responses per question")
+    elif args.openai:
         print(f"\nMode: OpenAI ({args.model}), sampling {args.n} responses per question")
     else:
         print("\nMode: manual (you provide the responses)")
-        print("Tip:  run with --openai to auto-generate responses via GPT-4o-mini")
+        print("Tip:  run with --claude or --openai to auto-generate responses")
 
     print("\nLoading entailment model...")
     entailment_model, model_name = load_entailment_model(
+        use_claude=args.claude_entailment,
+        claude_model=args.claude_model,
         use_openai=args.openai_entailment,
         openai_model=args.model,
         local_path=args.entailment_model,
@@ -427,7 +525,17 @@ def main():
         if question.lower() in ("quit", "exit", "q", ""):
             break
 
-        if args.openai:
+        if args.claude:
+            try:
+                pairs = sample_responses_claude(question, args.n, args.claude_model)
+            except Exception as e:
+                print(f"\nClaude error: {e}")
+                print("Falling back to manual mode.\n")
+                pairs = collect_responses_manually()
+                source = "manual"
+            else:
+                source = "claude"
+        elif args.openai:
             try:
                 pairs = sample_responses_openai(question, args.n, args.model)
             except Exception as e:
