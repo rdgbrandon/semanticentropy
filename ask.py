@@ -46,6 +46,8 @@ class EntailmentDebertaSmall:
     REMAP = {0: 0, 1: 2, 2: 1}   # model order -> paper order
 
     def __init__(self):
+        os.environ["USE_TF"]    = "0"   # force PyTorch backend; avoids broken TF DLL
+        os.environ["USE_TORCH"] = "1"
         import torch
         import torch.nn.functional as F
         from transformers import AutoModelForSequenceClassification, AutoTokenizer
@@ -403,10 +405,11 @@ def analyse(question: str, responses_with_lp: list[tuple[str, float]], source: s
         lp_str = f"logP={lp:+.3f}" if source == "openai" else "logP=uniform"
         print(f"  [{i}] {lp_str}  {r}")
 
-    # Similarity matrix  (content-word Jaccard -- matches what clustering uses)
+    # Similarity matrix (always Jaccard for display, independent of entailment model)
     print("\nPairwise content-word Jaccard similarity:")
     n = len(responses)
-    contents = [model._content(r) for r in responses]
+    _heuristic = EntailmentContent()
+    contents   = [_heuristic._content(r) for r in responses]
 
     def jaccard(a, b):
         if not a or not b:
@@ -418,7 +421,6 @@ def analyse(question: str, responses_with_lp: list[tuple[str, float]], source: s
     for i in range(n):
         row = f"  [{i}]    " + "  ".join(f"{jaccard(contents[i], contents[j]):.2f}" for j in range(n))
         print(row)
-    print(f"  (entailment >= 0.50 or subset | contradiction = both sides unique)")
 
 
     # Clustering
