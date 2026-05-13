@@ -219,15 +219,15 @@ class EntailmentContent:
         if not c1 or not c2:
             vec = TfidfVectorizer().fit_transform([text1, text2])
             sim = float(cosine_similarity(vec[0], vec[1])[0, 0])
-            return 2 if sim >= 0.45 else (1 if sim >= 0.15 else 0)
+            return 2 if sim >= 0.25 else (1 if sim >= 0.10 else 0)
         if c1.issubset(c2) or c2.issubset(c1):
             return 2
         jaccard = len(c1 & c2) / len(c1 | c2)
-        if jaccard >= 0.5:
+        if jaccard >= 0.25:   # lowered from 0.50 -- merge more paraphrases
             return 2
-        if (c1 - c2) and (c2 - c1):
-            return 0
-        return 1
+        if c1 & c2:           # any shared content word -> neutral, not contradiction
+            return 1
+        return 0              # completely disjoint vocabulary -> contradiction
 
 
 def load_entailment_model(use_openai: bool = False, openai_model: str = "gpt-4o-mini",
