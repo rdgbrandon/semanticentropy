@@ -50,8 +50,28 @@ SCENARIOS = [
             "France's capital is Paris.",
             "Paris serves as the capital of France.",
             "The answer is Paris.",
+            "It is Paris.",
+            "Paris, of course, is the capital of France.",
+            "The capital city is Paris.",
+            "Paris is France's capital.",
+            "France is governed from its capital, Paris.",
+            "The capital of France is the city of Paris.",
+            "Paris has been the capital of France for centuries.",
+            "It's Paris.",
+            "The French capital is Paris.",
+            "Paris is the capital.",
+            "France's capital city is Paris.",
+            "The capital is the city of Paris.",
+            "Paris is where the French government is based.",
+            "Paris, which is the capital of France.",
+            "The capital and largest city of France is Paris.",
         ],
-        "log_likelihoods": [-0.50, -0.60, -0.55, -0.65, -0.40],
+        "log_likelihoods": [
+            -0.50, -0.60, -0.55, -0.65, -0.40,
+            -0.45, -0.58, -0.52, -0.63, -0.70,
+            -0.48, -0.75, -0.42, -0.56, -0.44,
+            -0.61, -0.53, -0.68, -0.59, -0.47,
+        ],
     },
     {
         "label":    "MEDIUM UNCERTAINTY",
@@ -60,10 +80,30 @@ SCENARIOS = [
             "Alexander Graham Bell invented the telephone.",
             "The telephone was invented by Alexander Graham Bell.",
             "Bell is widely credited with inventing the telephone.",
+            "Alexander Graham Bell patented the telephone in 1876.",
+            "Bell developed the first practical telephone.",
+            "The telephone was invented by Bell in the 19th century.",
+            "Alexander Graham Bell is the inventor of the telephone.",
+            "Bell invented the telephone and received the patent.",
+            "Bell received the first patent for the telephone.",
+            "The telephone is attributed to Alexander Graham Bell.",
             "Elisha Gray also filed a patent on the same day as Bell.",
+            "Elisha Gray developed a similar device at the same time.",
             "Antonio Meucci is credited by some as the true inventor.",
+            "Antonio Meucci invented an early voice communication device.",
+            "Some historians credit Meucci with the telephone's invention.",
+            "The invention is disputed between Bell, Gray, and Meucci.",
+            "Bell received the patent but others claim priority.",
+            "Meucci filed a patent caveat before Bell's application.",
+            "The true inventor is debated among historians.",
+            "It was Bell who first patented the telephone.",
         ],
-        "log_likelihoods": [-0.80, -0.90, -0.85, -2.10, -2.50],
+        "log_likelihoods": [
+            -0.80, -0.90, -0.85, -0.88, -0.92,
+            -0.95, -0.87, -0.83, -0.91, -0.86,
+            -2.10, -2.20, -2.50, -2.40, -2.60,
+            -2.80, -2.70, -2.90, -3.00, -0.89,
+        ],
     },
     {
         "label":    "HIGH UNCERTAINTY",
@@ -74,8 +114,28 @@ SCENARIOS = [
             "JavaScript runs everywhere, making it the best choice.",
             "C++ is the best for high-performance systems programming.",
             "There is no single best language; it depends on context.",
+            "Java is the best due to its portability and ecosystem.",
+            "Go is the best for building scalable backend services.",
+            "TypeScript is the best because it adds type safety to JavaScript.",
+            "Kotlin is the best modern language for Android development.",
+            "Swift is the best language for Apple platform development.",
+            "Haskell is the best for functional and mathematically rigorous code.",
+            "C is the best because it gives full control over hardware.",
+            "Ruby is the best for rapid web application development.",
+            "Scala combines functional and object-oriented programming best.",
+            "Julia is the best for scientific computing and data analysis.",
+            "R is the best language for statistical analysis.",
+            "Elixir is the best for fault-tolerant distributed systems.",
+            "PHP is widely used and best for quick web deployment.",
+            "Lua is the best for embedded scripting and game development.",
+            "Assembly is the best when raw performance is critical.",
         ],
-        "log_likelihoods": [-1.20, -1.50, -1.30, -1.80, -1.60],
+        "log_likelihoods": [
+            -1.20, -1.50, -1.30, -1.80, -1.60,
+            -1.40, -1.55, -1.35, -1.70, -1.65,
+            -1.90, -1.45, -1.75, -1.85, -1.95,
+            -1.60, -2.00, -1.50, -1.80, -2.10,
+        ],
     },
 ]
 
@@ -161,28 +221,32 @@ def draw_responses(ax, scenario: dict, result: dict):
     ax.set_ylim(-0.5, n - 0.5)
     ax.axis("off")
 
+    row_h  = 0.78          # row height (shrinks as n grows)
+    fsize  = max(5.5, 8.0 - (n - 5) * 0.15)   # scale font with n
+    pad    = row_h / 2 - 0.01
+
     for i, (r, sid) in enumerate(zip(responses, sem_ids)):
         y     = n - 1 - i
         color = CLUSTER_COLORS[sid % len(CLUSTER_COLORS)]
         light = CLUSTER_LIGHT[sid  % len(CLUSTER_LIGHT)]
-        short = (r[:60] + "...") if len(r) > 60 else r
+        short = (r[:62] + "...") if len(r) > 62 else r
 
         # row background
         rect = mpatches.FancyBboxPatch(
-            (0.0, y - 0.40), 1.0, 0.80,
+            (0.0, y - pad), 1.0, row_h,
             boxstyle="round,pad=0.01",
-            facecolor=light, edgecolor=color, linewidth=1.2,
+            facecolor=light, edgecolor=color, linewidth=0.9,
         )
         ax.add_patch(rect)
 
         # cluster badge
-        ax.text(0.035, y, f"C{sid}", fontsize=8, fontweight="bold",
+        ax.text(0.035, y, f"C{sid}", fontsize=fsize, fontweight="bold",
                 color="white", va="center", ha="center",
-                bbox=dict(boxstyle="round,pad=0.28",
+                bbox=dict(boxstyle="round,pad=0.22",
                           facecolor=color, edgecolor="none"))
 
         # response text
-        ax.text(0.09, y, f"[{i}] {short}", fontsize=7.8, va="center",
+        ax.text(0.09, y, f"[{i}] {short}", fontsize=fsize, va="center",
                 color="#2C3E50")
 
 # ---------------------------------------------------------------------------
@@ -370,7 +434,7 @@ def main():
     # -----------------------------------------------------------------------
     # Figure layout
     # -----------------------------------------------------------------------
-    fig = plt.figure(figsize=(17, 16))
+    fig = plt.figure(figsize=(17, 22))
     fig.patch.set_facecolor("#F8F9FA")
 
     fig.suptitle(
