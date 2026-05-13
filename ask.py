@@ -66,7 +66,9 @@ class EntailmentDebertaLarge:
         self._torch  = torch
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"  Loading {self.MODEL} on {self._device} ...")
-        self._tok   = AutoTokenizer.from_pretrained(self.MODEL)
+        # use_fast=False: deberta-v2 uses SentencePiece; fast tokenizer conversion
+        # fails on some transformers versions
+        self._tok   = AutoTokenizer.from_pretrained(self.MODEL, use_fast=False)
         self._model = AutoModelForSequenceClassification.from_pretrained(
             self.MODEL).to(self._device)
         self._model.eval()
